@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+
 from common import ComplexPoint, arg_complex
 
 
@@ -187,6 +189,7 @@ class OrientationMixin:
         return self._interp(2, 2, alpha)
 
     def get_orient(self, i: int, j: int) -> float:
+        """Scalar fallback — kept for debugging and backward compatibility."""
         st = self.singularity_type
         local_orient = 0.0
         if st == 1:
@@ -214,10 +217,85 @@ class OrientationMixin:
             degrees = -(((-1) * degrees) % 180) + 180
         return degrees * self.deg_rad_fact
 
+    # ------------------------------------------------------------------
+    # Vectorized interpolation helper for orientmap_vectorized
+    # ------------------------------------------------------------------
+    def _interp_vec(self, a: int, b: int, alpha: np.ndarray) -> np.ndarray:
+        """Piecewise-linear interpolation over g_cap table, fully vectorized.
+
+        Replicates the scalar _interp() but operates on a 2-D NumPy array of
+        angles simultaneously — no Python loop over pixels.
+        """
+        alpha_temp = math.pi + alpha                    # shift to [0, 2π)
+        q = np.floor(4.0 * alpha_temp / math.pi).astype(np.int32)
+        q = np.clip(q, 0, 7)                            # q ∈ [0, 7]
+
+        alpha_i = -math.pi + (math.pi * q) / 4.0       # base angle for segment
+
+        # g_cap[a, b] has shape (10,); indices q+1 and q+2 (1-based, clamped)
+        gcap_row = self.g_cap[a, b]                     # shape (10,)
+        g1 = gcap_row[q + 1]                            # shape (H, W) broadcast
+        g2 = gcap_row[np.minimum(q + 2, 9)]            # clamp to avoid OOB
+
+        return g1 + ((4.0 * (alpha - alpha_i)) / math.pi) * (g2 - g1)
+
     def orientmap(self):
-        for i in range(self.H + self.margin):
-            for j in range(self.W + self.margin):
-                self.orient[i, j] = self.get_orient(i - self.padding, j - self.padding)
+        """Fully vectorized orientation map — replaces the per-pixel Python loop.
+
+        Computes self.orient[i, j] = get_orient(i - padding, j - padding) for
+        every pixel simultaneously using NumPy broadcasting.  The scalar
+        get_orient() is kept unchanged for debugging.
+        """
+        Hm = self.H + self.margin
+        Wm = self.W + self.margin
+
+        # Pixel coordinate grids (shifted by padding to match the original loop)
+        i_grid, j_grid = np.meshgrid(
+            np.arange(Hm, dtype=np.float64) - self.padding,
+            np.arange(Wm, dtype=np.float64) - self.padding,
+            indexing='ij',
+        )  # both shape (Hm, Wm)
+
+        st = self.singularity_type
+        local_orient = np.zeros((Hm, Wm), dtype=np.float64)
+
+        if st == 1:
+            # atan(max(0, k*(1 - i/(H*f2))) * cos(j*π/(W*f1)))
+            factor = np.maximum(
+                0.0,
+                self.k_arch - self.k_arch * i_grid / (self.H * self.arch_fact2),
+            )
+            local_orient = np.arctan(factor * np.cos(j_grid * math.pi / (self.W * self.arch_fact1)))
+
+        elif st in (2, 3, 4):
+            # alpha_v1 = arg(z - d1),  alpha_u1 = arg(z - l1)
+            alpha_v1 = np.arctan2(i_grid - self.d[1].y, j_grid - self.d[1].x)
+            alpha_u1 = np.arctan2(i_grid - self.l[1].y, j_grid - self.l[1].x)
+            local_orient = 0.5 * (
+                self._interp_vec(1, 2, alpha_v1) - self._interp_vec(1, 1, alpha_u1)
+            )
+
+        elif st in (5, 6):
+            alpha_v1 = np.arctan2(i_grid - self.d[1].y, j_grid - self.d[1].x)
+            alpha_u1 = np.arctan2(i_grid - self.l[1].y, j_grid - self.l[1].x)
+            alpha_v2 = np.arctan2(i_grid - self.d[2].y, j_grid - self.d[2].x)
+            alpha_u2 = np.arctan2(i_grid - self.l[2].y, j_grid - self.l[2].x)
+            local_orient = 0.5 * (
+                self._interp_vec(1, 2, alpha_v1) - self._interp_vec(1, 1, alpha_u1)
+            )
+            local_orient += 0.5 * (
+                self._interp_vec(2, 2, alpha_v2) - self._interp_vec(2, 1, alpha_u2)
+            )
+
+        # Convert to degrees, apply modulo in the same way as the scalar path,
+        # then convert back to radians.
+        degrees = (local_orient * self.rad_deg_fact).astype(np.int64)
+        pos_mask = degrees > 0
+        neg_mask = degrees < 0
+        degrees[pos_mask] = degrees[pos_mask] % 180
+        degrees[neg_mask] = -((-degrees[neg_mask]) % 180) + 180
+
+        self.orient = (degrees * self.deg_rad_fact).astype(np.float32)
         return self.orient
 
     def seed_pos(self):
