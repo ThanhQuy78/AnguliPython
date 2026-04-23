@@ -26,7 +26,7 @@ if __name__ == '__main__':
         generation_seed=42,
         density_dir='/kaggle/input/datasets/poseidon127/anguli/Densitymaps',
         filterbank_dir='/kaggle/input/datasets/poseidon127/anguli/Filterbank',
-        noise_blob_dir='/kaggle/input/datasets/poseidon127/angulinoise_blob',
+        noise_blob_dir='/kaggle/input/datasets/poseidon127/anguli/noise_blob',
         strict_assets=True,
         filter_zero_point=46,
     )
