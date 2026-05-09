@@ -20,13 +20,15 @@ if __name__ == '__main__':
     OUT_SIZE = (TARGET_W, TARGET_H)   # (W, H) for cv2.resize
     # ─────────────────────────────────────────────────────────────────────────
 
+    from pathlib import Path
+
     gen = AnguliFaithfulGenerator(
         W=RENDER_W,
         H=RENDER_H,
         generation_seed=42,
-        density_dir='/kaggle/input/datasets/poseidon127/anguli-packed/Densitymaps',
-        filterbank_dir='/kaggle/input/datasets/poseidon127/anguli-packed/filterbank_packed.npz',
-        noise_blob_dir='/kaggle/input/datasets/poseidon127/anguli-packed/noise_blob',
+        density_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/Densitymaps'),
+        filterbank_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/filterbank_packed.npz'),
+        noise_blob_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/noise_blob'),
         strict_assets=True,
         filter_zero_point=46,
     )
