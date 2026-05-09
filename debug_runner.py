@@ -4,20 +4,10 @@ import cv2
 
 from pipeline import AnguliFaithfulGenerator
 
-import torch
-
-
 
 if __name__ == '__main__':
     base = Path(r'')
     out_dir = base / 'pipeline_debug_faithful_v3'
-
-    # Kích hoạt CUDA context ngay lập tức khi chạy script
-    if torch.cuda.is_available():
-        # Thực hiện 1 phép tính nhỏ vô thưởng vô phạt trên GPU để ép PyTorch khởi tạo CUDA
-        _ = torch.zeros(1).cuda()
-        print("CUDA initialized successfully!")
-
 
     # ── Super-resolution rendering ────────────────────────────────────────────
     # Generate at 2× canvas size (512×720) so the fixed-size filterbank kernels
@@ -34,9 +24,9 @@ if __name__ == '__main__':
         W=RENDER_W,
         H=RENDER_H,
         generation_seed=42,
-        density_dir='/kaggle/input/datasets/poseidon127/anguli/Densitymaps',
-        filterbank_dir='/kaggle/input/datasets/poseidon127/anguli/Filterbank',
-        noise_blob_dir='/kaggle/input/datasets/poseidon127/anguli/noise_blob',
+        density_dir='/kaggle/input/datasets/poseidon127/anguli_packed/Densitymaps',
+        filterbank_dir='/kaggle/input/datasets/poseidon127/anguli_packed/filterbank_packed.npz',
+        noise_blob_dir='/kaggle/input/datasets/poseidon127/anguli_packed/noise_blob',
         strict_assets=True,
         filter_zero_point=46,
     )
