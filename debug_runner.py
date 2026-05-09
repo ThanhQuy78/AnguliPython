@@ -4,10 +4,20 @@ import cv2
 
 from pipeline import AnguliFaithfulGenerator
 
+import torch
+
+
 
 if __name__ == '__main__':
     base = Path(r'')
     out_dir = base / 'pipeline_debug_faithful_v3'
+
+    # Kích hoạt CUDA context ngay lập tức khi chạy script
+    if torch.cuda.is_available():
+        # Thực hiện 1 phép tính nhỏ vô thưởng vô phạt trên GPU để ép PyTorch khởi tạo CUDA
+        _ = torch.zeros(1).cuda()
+        print("CUDA initialized successfully!")
+
 
     # ── Super-resolution rendering ────────────────────────────────────────────
     # Generate at 2× canvas size (512×720) so the fixed-size filterbank kernels
