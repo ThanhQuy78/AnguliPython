@@ -48,6 +48,10 @@ def load_filterbank_assets(
     distnct_o: int,
     filter_zero_point: int = FILTER_ZERO_POINT,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
+    if filterbank_dir is not None and filterbank_dir.is_file() and filterbank_dir.suffix.lower() == '.npz':
+        data = np.load(str(filterbank_dir))
+        return data['filterbank'], data['filter_sizes'], int(data['max_size'])
+
     filterbank_dir = require_dir(filterbank_dir, 'filterbank_dir')
     folders = sorted_numeric_paths([p for p in filterbank_dir.iterdir() if p.is_dir()])
     if strict_assets and len(folders) != 100:
