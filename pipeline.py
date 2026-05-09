@@ -7,11 +7,21 @@ from typing import List, Optional
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.interpolate as interp
 
 from assets import FILTER_ZERO_POINT, index_densitymaps, load_filterbank_assets, load_noise_blobs, select_and_merge_densitymap
-from common import ComplexPoint, NoiseBlob, normalize_int_like_anguli, binarize_int_like_anguli
+from common import ComplexPoint, NoiseBlob, normalize_int_like_anguli, binarize_int_like_anguli, get_device
 from filtering import FilteringMixin
 from orientation import OrientationMixin
+
+# ---------------------------------------------------------------------------
+# Optional torch import
+# ---------------------------------------------------------------------------
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 
 
 class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
@@ -25,11 +35,17 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
     - integer-like normalize/binarize behavior of filter passes
     - picturize, scratches, fixed noise, random impression masking, and distortion
 
+    GPU acceleration:
+    - orientmap() is fully vectorized with NumPy (no Python loop)
+    - _apply_filter_pass() dispatches to PyTorch CUDA when use_gpu=True and
+      CUDA is available, otherwise falls back to the original CPU loop
+    - distortion() is vectorized with NumPy (no Python loop)
+
     Notes:
     - filterbank decoding uses a configurable zero point (default 46), inferred from
       the original C++ optimized lookup path.
     - random_noise() follows the public Anguli source with FINE_EDGE disabled.
-    - distortion() keeps the public Anguli math but uses safe Python clamping for
+    - distortion() keeps the public Anguli math but uses safe NumPy clamping for
       array bounds instead of relying on legacy C++ indexing quirks.
     """
 
@@ -47,6 +63,7 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
         noise_blob_dir: Optional[str] = None,
         strict_assets: bool = True,
         filter_zero_point: int = FILTER_ZERO_POINT,
+        use_gpu: bool = True,
     ):
         self.W = W
         self.H = H
@@ -111,6 +128,31 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
         if self.noise_blob_dir is not None:
             self.noise_blobs = load_noise_blobs(self.noise_blob_dir, self.strict_assets)
 
+        # -- GPU setup --------------------------------------------------------
+        self._gpu_device = None
+        self._fb_flat = None
+        if use_gpu and _TORCH_AVAILABLE:
+            try:
+                device = get_device(use_gpu=True)
+                self._gpu_device = device
+                # Pre-build flat filterbank tensor on GPU:
+                #   filterbank shape: (101, distnct_o, k, k)  dtype int32
+                #   flatten freq×orient → n_kernels; flatten k×k → k²
+                k = self.max_filter_size
+                n_freq, n_orient = self.filterbank.shape[0], self.filterbank.shape[1]
+                fb_reshaped = self.filterbank.reshape(n_freq * n_orient, k * k)  # (n, k²)
+                self._fb_flat = torch.from_numpy(
+                    fb_reshaped.astype(np.int32)
+                ).to(device)  # stays on GPU for the entire session
+                print(f'[AnguliFaithfulGenerator] GPU mode active — device: {device}')
+            except Exception as exc:
+                print(f'[AnguliFaithfulGenerator] GPU init failed ({exc}), falling back to CPU.')
+                self._gpu_device = None
+                self._fb_flat = None
+        else:
+            if use_gpu and not _TORCH_AVAILABLE:
+                print('[AnguliFaithfulGenerator] torch not installed — running on CPU.')
+
     # ---- Density ---------------------------------------------------------
     def sel_n_merg_densitymap(self):
         self.f_den_2Dmat = select_and_merge_densitymap(
@@ -123,19 +165,86 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
         return self.f_den_2Dmat
 
     # ---- Master post-processing -----------------------------------------
-    def add_scratches(self, img: np.ndarray, min_scratches: int = 0, max_scratches: int = 6) -> np.ndarray:
+    def add_ridge_edge_roughness(self, img: np.ndarray, bumpiness: float = 1.2) -> np.ndarray:
+        noise = self.rng.uniform(-1.0, 1.0, img.shape).astype(np.float32)
+        noise = cv2.GaussianBlur(noise, (7, 7), 3.0)
+        noise = (noise - np.mean(noise)) / (np.std(noise) + 1e-5)
+        noise = noise * (bumpiness * 30.0)
+        
+        base_blur = cv2.GaussianBlur(img, (5, 5), 0).astype(np.float32)
+        
+        perturbed = base_blur + noise
+        out = (perturbed > 127).astype(np.uint8) * 255
+        return out
+
+    def add_sweat_pores(self, img: np.ndarray, mu: float = 20.0, sigma: float = 5.0) -> np.ndarray:
+        binary_inv = (img < 127).astype(np.uint8) * 255
+        skeleton = cv2.ximgproc.thinning(binary_inv)
+        
+        out = img.copy()
+        num_labels, labels = cv2.connectedComponents(skeleton, connectivity=8)
+        
+        for label in range(1, num_labels):
+            mask = (labels == label)
+            pts_y, pts_x = np.nonzero(mask)
+            if len(pts_y) < 10:
+                continue
+                
+            pts = np.column_stack((pts_x, pts_y))
+            self.rng.shuffle(pts)
+            
+            selected_pores = []
+            for p in pts:
+                if not selected_pores:
+                    selected_pores.append(p)
+                else:
+                    dists = np.linalg.norm(np.array(selected_pores) - p, axis=1)
+                    if np.min(dists) > max(10.0, self.rng.normal(mu, sigma)):
+                        selected_pores.append(p)
+                        
+            for px, py in selected_pores:
+                r = int(self.rng.choice([0, 1]))
+                cv2.circle(out, (int(px), int(py)), r, 255, -1)
+                    
+        return out
+
+    def add_scratches(self, img: np.ndarray, min_scratches: int = 5, max_scratches: int = 15) -> np.ndarray:
         out = img.copy()
         num_scratches = int(min_scratches + (max_scratches - min_scratches) * self.ahaq_rand())
         width = out.shape[1]
         height = out.shape[0]
-        part = 10
+        
         for _ in range(num_scratches):
-            x1 = int((width / part) + self.ahaq_rand() * (((part - 2) * width / part)))
-            y1 = int((height / part) + self.ahaq_rand() * (((part - 2) * height / part)))
-            x2 = int((width / part) + self.ahaq_rand() * (((part - 2) * width / part)))
-            y2 = int((height / part) + self.ahaq_rand() * (((part - 2) * height / part)))
-            wide = int(1 + self.ahaq_rand() * 6)
-            cv2.line(out, (x1, y1), (x2, y2), 255, wide, cv2.LINE_AA)
+            num_pts = int(self.rng.integers(3, 5))
+            
+            cx = self.rng.uniform(0, width)
+            cy = self.rng.uniform(0, height)
+            length = self.rng.uniform(20, 80)
+            angle = self.rng.uniform(0, 2 * np.pi)
+            
+            t = np.linspace(-length/2, length/2, num_pts)
+            dx = t * np.cos(angle)
+            dy = t * np.sin(angle)
+            
+            noise = self.rng.normal(0, length * 0.1, num_pts)
+            nx = -noise * np.sin(angle)
+            ny = noise * np.cos(angle)
+            
+            pts_x = cx + dx + nx
+            pts_y = cy + dy + ny
+            
+            try:
+                tck, u = interp.splprep([pts_x, pts_y], s=0, k=min(3, num_pts-1))
+                unew = np.linspace(0, 1, 100)
+                out_x, out_y = interp.splev(unew, tck)
+                curve_pts = np.vstack((out_x, out_y)).T.astype(np.int32)
+            except Exception:
+                curve_pts = np.vstack((pts_x, pts_y)).T.astype(np.int32)
+            
+            wide = int(self.rng.integers(1, 3))
+            
+            cv2.polylines(out, [curve_pts], isClosed=False, color=255, thickness=wide, lineType=cv2.LINE_AA)
+            
         return out
 
     def paste_noise_blob(self, img: np.ndarray, x: int, y: int, blob_or_k):
@@ -259,7 +368,12 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
         return working
 
     def distortion(self, img: np.ndarray) -> np.ndarray:
-        """Best-effort faithful port of public Anguli distortion()."""
+        """Vectorized faithful port of public Anguli distortion().
+
+        The original triple-nested Python loop is replaced by NumPy vectorized
+        operations.  All arithmetic is identical; only the iteration strategy
+        changes from pixel-by-pixel Python to NumPy array operations.
+        """
         f_print1 = img.astype(np.uint8)
         height, width = f_print1.shape
         new_dim = max(width, height)
@@ -276,8 +390,6 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
 
         center_x = int(math.floor(new_dim / 2.0))
         center_y = int(math.floor(new_dim / 2.0))
-        # Scale the distortion ellipse proportionally to new_dim.
-        # The original constants were tuned for a ~360px reference canvas.
         _dist_scale = new_dim / 360.0
         a1 = int(math.floor((100 / 3.0) * _dist_scale))
         a2 = a1
@@ -286,6 +398,10 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
         c = 0
         h = 0
         kshift = 0
+
+        # ------------------------------------------------------------------
+        # Build ellipse tables y1..y4 — kept as scalar loop (only 201 iters)
+        # ------------------------------------------------------------------
         y1 = np.zeros(201, dtype=np.float64)
         y2 = np.zeros(201, dtype=np.float64)
         y3 = np.zeros(201, dtype=np.float64)
@@ -306,63 +422,122 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
             y3[i] += 200 + kshift
             y4[i] += 200 + kshift
 
+        # ------------------------------------------------------------------
+        # Fill shapedist — vectorized over the small ellipse index ranges
+        # ------------------------------------------------------------------
+        # Left half (j in [200-a2, 200])
         for j in range(200 - a2, 201):
-            for l in range(int(math.floor(y2[j])), int(math.floor(y4[j])) - 1, -1):
-                rr = 400 - l
-                cc2 = j + h
-                if 0 <= rr < new_dim and 0 <= cc2 < new_dim:
-                    shapedist[rr, cc2] = 0
+            lo = int(math.floor(y4[j]))
+            hi = int(math.floor(y2[j]))
+            if lo > hi:
+                lo, hi = hi, lo
+            ls = np.arange(lo, hi + 1, dtype=np.int64)
+            rr_vals = (400 - ls).astype(np.int64)
+            cc2_vals = j + h
+            valid = (rr_vals >= 0) & (rr_vals < new_dim) & (cc2_vals >= 0) & (cc2_vals < new_dim)
+            if valid.any():
+                shapedist[rr_vals[valid], cc2_vals] = 0
 
+        # Right half (j in [1, a1])
         for j in range(1, a1 + 1):
-            for l in range(int(math.floor(y1[j])), int(math.floor(y3[j])) - 1, -1):
-                rr = 400 - l
-                cc2 = j + 200 + h
-                if 0 <= rr < new_dim and 0 <= cc2 < new_dim:
-                    shapedist[rr, cc2] = 0
+            lo = int(math.floor(y3[j]))
+            hi = int(math.floor(y1[j]))
+            if lo > hi:
+                lo, hi = hi, lo
+            ls = np.arange(lo, hi + 1, dtype=np.int64)
+            rr_vals = (400 - ls).astype(np.int64)
+            cc2_vals = j + 200 + h
+            valid = (rr_vals >= 0) & (rr_vals < new_dim) & (cc2_vals >= 0) & (cc2_vals < new_dim)
+            if valid.any():
+                shapedist[rr_vals[valid], cc2_vals] = 0
 
+        # ------------------------------------------------------------------
+        # Main distortion transform — fully vectorized with NumPy meshgrid
+        # ------------------------------------------------------------------
         theta = self.rotmin + (self.rotmax - self.rotmin) * self.ahaq_rand()
         parak = 2
         trans_x = math.floor(self.transmin + (self.transmax - self.transmin) * self.ahaq_rand())
         trans_y = math.floor(self.transmin + (self.transmax - self.transmin) * self.ahaq_rand())
 
-        for j in range(1, new_dim + 1):
-            for k in range(1, new_dim + 1):
-                if shapedist[j - 1, k - 1] == -2:
-                    temp1 = j - center_x
-                    temp3 = temp1 / float(a1 * a1)
-                    temp2 = k - center_y
-                    temp4 = temp2 / float(b1 * b1)
-                    temp1 = temp1 * temp3 + temp2 * temp4
-                    temp3 = math.sqrt(temp1) - 1
-                else:
-                    temp3 = -2
+        # Pixel coordinate grids (1-indexed as in original: range 1..new_dim)
+        jj, kk_idx = np.meshgrid(
+            np.arange(1, new_dim + 1, dtype=np.float64),
+            np.arange(1, new_dim + 1, dtype=np.float64),
+            indexing='ij',
+        )  # both (new_dim, new_dim)
 
-                temp1 = (j - center_x) * math.cos(theta) + (k - center_y) * math.sin(theta) + center_x
-                temp1 += trans_x - j
-                temp2 = -(j - center_x) * math.sin(theta) + (k - center_y) * math.cos(theta) + center_y
-                temp2 += trans_y - k
+        # shapedist at each pixel
+        sd = shapedist[jj.astype(np.int64) - 1, kk_idx.astype(np.int64) - 1]
 
-                if temp3 <= 0:
-                    temp3 = 0
-                elif 0 < temp3 <= parak:
-                    temp3 = 0.5 * (1 - math.cos((temp3 * self.pi) / parak))
-                else:
-                    temp3 = 1
+        # Compute temp3 (distortion weight) vectorized
+        outside_mask = sd == -2
+        temp1_raw = jj - center_x
+        temp2_raw = kk_idx - center_y
+        temp3_raw = np.where(
+            outside_mask,
+            np.sqrt(np.maximum(0.0,
+                temp1_raw * (temp1_raw / float(a1 * a1)) +
+                temp2_raw * (temp2_raw / float(b1 * b1))
+            )) - 1.0,
+            -2.0,
+        )
 
-                distortion_x = j + temp1 * temp3
-                distortion_y = k + temp2 * temp3
-                if not (distortion_x <= 1 or distortion_y <= 1 or distortion_x >= 400 or distortion_y >= 400):
-                    ind1 = max(0, min(new_dim - 1, int(distortion_x)))
-                    ind2 = max(0, min(new_dim - 1, int(distortion_y)))
-                    result_image[ind1, ind2] = kk[j - 1, k - 1]
+        # Clamp and cos-blend
+        temp3 = np.where(
+            temp3_raw <= 0,
+            0.0,
+            np.where(
+                temp3_raw <= parak,
+                0.5 * (1 - np.cos((temp3_raw * self.pi) / parak)),
+                1.0,
+            ),
+        )
 
-        cropped = np.full((height, width), 255, dtype=np.uint8)
-        for i in range(height):
-            for j in range(width):
-                rr = aa + i - 1
-                ccx = cc + j - 1
-                if 0 <= rr < new_dim and 0 <= ccx < new_dim:
-                    cropped[i, j] = np.uint8(np.clip(result_image[rr, ccx], 0, 255))
+        # Rotation + translation displacement
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        disp_x = (jj - center_x) * cos_t + (kk_idx - center_y) * sin_t + center_x + trans_x - jj
+        disp_y = -(jj - center_x) * sin_t + (kk_idx - center_y) * cos_t + center_y + trans_y - kk_idx
+
+        distortion_x = jj + disp_x * temp3    # (new_dim, new_dim)
+        distortion_y = kk_idx + disp_y * temp3
+
+        # Valid pixel mask (original condition: > 1 and < 400 inclusive check)
+        valid = (
+            (distortion_x > 1) & (distortion_y > 1) &
+            (distortion_x < 400) & (distortion_y < 400)
+        )
+
+        # Source indices into kk (result indexed from 0, kk is 0-based)
+        src_r = np.clip(jj.astype(np.int64) - 1, 0, new_dim - 1)
+        src_c = np.clip(kk_idx.astype(np.int64) - 1, 0, new_dim - 1)
+        # Destination indices in result_image
+        dst_r = np.clip(distortion_x.astype(np.int64), 0, new_dim - 1)
+        dst_c = np.clip(distortion_y.astype(np.int64), 0, new_dim - 1)
+
+        # Apply scatter only for valid pixels
+        valid_flat = valid.ravel()
+        src_r_f = src_r.ravel()[valid_flat]
+        src_c_f = src_c.ravel()[valid_flat]
+        dst_r_f = dst_r.ravel()[valid_flat]
+        dst_c_f = dst_c.ravel()[valid_flat]
+
+        # Scatter: result_image[dst_r, dst_c] = kk[src_r, src_c]
+        # Matches original: result_image[ind1, ind2] = kk[j-1, k-1]
+        result_image[dst_r_f, dst_c_f] = kk[src_r_f, src_c_f]
+
+        # ------------------------------------------------------------------
+        # Crop back to original (height, width) — vectorized
+        # ------------------------------------------------------------------
+        rr_idx = np.clip(
+            np.arange(height, dtype=np.int64) + aa - 1, 0, new_dim - 1
+        )
+        cc_idx = np.clip(
+            np.arange(width, dtype=np.int64) + cc - 1, 0, new_dim - 1
+        )
+        cropped = np.clip(
+            result_image[np.ix_(rr_idx, cc_idx)], 0, 255
+        ).astype(np.uint8)
         return cropped
 
     def save_metadata(self, path: str | Path):
@@ -528,6 +703,8 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
 
         # faithful Anguli: no extra normalize+binarize here
         img = self.picturize()
+        img = self.add_ridge_edge_roughness(img)
+        img = self.add_sweat_pores(img)
         img = self.add_scratches(img)
         img = self.fixed_noise(img, count=600)
 

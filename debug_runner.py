@@ -30,10 +30,12 @@ if __name__ == '__main__':
         strict_assets=True,
         filter_zero_point=46,
     )
+    """
     info = gen.run_until_global_filter_and_save(
             class_distribution=6,
             out_dir=str(out_dir / 'pipeline_steps'),
         )
+    """
     master = gen.generate_master(class_distribution=6, save_debug=str(out_dir / 'master_debug'), out_size=None)
     
     master_small = cv2.resize(master, OUT_SIZE, interpolation=cv2.INTER_AREA)

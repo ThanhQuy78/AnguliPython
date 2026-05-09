@@ -6,6 +6,15 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+# ---------------------------------------------------------------------------
+# Optional PyTorch import — GPU helpers degrade gracefully on CPU-only systems
+# ---------------------------------------------------------------------------
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
 
 VALID_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
 
@@ -104,3 +113,62 @@ def binarize_int_like_anguli(a: np.ndarray, thresh: int) -> np.ndarray:
     out = np.asarray(a, dtype=np.int32).copy()
     out = np.where(out > thresh, 100, 0).astype(np.int32)
     return out
+
+
+# ---------------------------------------------------------------------------
+# GPU helpers (PyTorch tensors) — only available when torch is installed
+# ---------------------------------------------------------------------------
+
+def get_device(use_gpu: bool = True):
+    """Return the best available torch.device.
+
+    Returns cuda if available and *use_gpu* is True, otherwise cpu.
+    Raises ImportError if torch is not installed.
+    """
+    if not _TORCH_AVAILABLE:
+        raise ImportError(
+            'PyTorch is not installed. Install it with: pip install torch'
+        )
+    if use_gpu and torch.cuda.is_available():
+        return torch.device('cuda')
+    return torch.device('cpu')
+
+
+def normalize_int_like_anguli_gpu(t):
+    """GPU equivalent of normalize_int_like_anguli.
+
+    Args:
+        t: torch.Tensor of dtype int32 or float32, any shape.
+
+    Returns:
+        torch.Tensor of same shape, dtype int32, values in [0, 100].
+    """
+    t = t.to(dtype=torch.float32)
+    minval = t.min()
+    if minval < 0:
+        t = t + minval.abs()
+    else:
+        t = t - minval
+
+    maxval = t.max()
+    if maxval <= 0:
+        return torch.zeros_like(t, dtype=torch.int32)
+
+    scale = maxval / 100.0
+    out = torch.trunc(t / scale).to(dtype=torch.int32)
+    return out
+
+
+def binarize_int_like_anguli_gpu(t, thresh: int):
+    """GPU equivalent of binarize_int_like_anguli.
+
+    Args:
+        t: torch.Tensor (int32 or float32).
+        thresh: Threshold value; pixels > thresh → 100, else → 0.
+
+    Returns:
+        torch.Tensor, dtype int32.
+    """
+    return torch.where(t > thresh,
+                       torch.tensor(100, dtype=torch.int32, device=t.device),
+                       torch.tensor(0,   dtype=torch.int32, device=t.device))
