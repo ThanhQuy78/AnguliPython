@@ -26,14 +26,14 @@ if __name__ == '__main__':
         W=RENDER_W,
         H=RENDER_H,
         generation_seed=42,
-        density_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/Densitymaps'),
-        filterbank_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/filterbank_packed.npz'),
-        noise_blob_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/noise_blob'),
+        density_dir=Path('Densitymaps'),
+        filterbank_dir=Path('filterbank_packed.npz'),
+        noise_blob_dir=Path('noise_blob'),
         strict_assets=True,
         filter_zero_point=46,
     )
     
-    for i in range(100):
+    for i in range(7):
         print(f"Generating master {i+1}/100...")
         
         # Reset generator dimensions for master generation
@@ -42,7 +42,7 @@ if __name__ == '__main__':
         
         current_out_dir = out_dir / f'fingerprint_{i:03d}'
         
-        master = gen.generate_master(class_distribution=0, save_debug=str(current_out_dir / 'master_debug'), out_size=None)
+        master = gen.generate_master(class_distribution=i, save_debug=str(current_out_dir / 'master_debug'), out_size=None)
         
         master_small = cv2.resize(master, OUT_SIZE, interpolation=cv2.INTER_AREA)
         cv2.imwrite(str(current_out_dir / 'master_debug' / 'master_only_256.png'), master_small)
