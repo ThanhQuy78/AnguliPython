@@ -742,8 +742,9 @@ class AnguliFaithfulGenerator(OrientationMixin, FilteringMixin):
         base_reference = master_img.copy().astype(np.uint8)
         base_binary = self._threshold_binary_255(base_reference)
         impressions: list[np.ndarray] = []
-        self._save_u8(out_dir, '00_master_reference.png', base_reference)
-        self._save_u8(out_dir, '01_master_binary.png', base_binary)
+        if save_debug:
+            self._save_u8(out_dir, '00_master_reference.png', base_reference)
+            self._save_u8(out_dir, '01_master_binary.png', base_binary)
 
         for idx in range(n_impr):
             work = base_binary.copy()

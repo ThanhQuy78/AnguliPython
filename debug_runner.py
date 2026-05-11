@@ -33,7 +33,7 @@ if __name__ == '__main__':
         filter_zero_point=46,
     )
     
-    for i in range(7):
+    for i in range(100):
         print(f"Generating master {i+1}/100...")
         
         # Reset generator dimensions for master generation
@@ -42,25 +42,29 @@ if __name__ == '__main__':
         
         current_out_dir = out_dir / f'fingerprint_{i:03d}'
         
-        master = gen.generate_master(class_distribution=i, save_debug=str(current_out_dir / 'master_debug'), out_size=None)
+        # Generate master without saving debug steps
+        master = gen.generate_master(class_distribution=0, save_debug=None, out_size=None)
         
         master_small = cv2.resize(master, OUT_SIZE, interpolation=cv2.INTER_AREA)
-        cv2.imwrite(str(current_out_dir / 'master_debug' / 'master_only_256.png'), master_small)
-            
-        gen.save_metadata(current_out_dir / 'master_debug' / 'metadata.txt')
+        
+        # Save only the resized master and metadata to the root of the output directory
+        current_out_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(current_out_dir / 'master.png'), master_small)
+        gen.save_metadata(current_out_dir / 'metadata.txt')
 
         # Set smaller dimensions for impression distortion
         gen.W = TARGET_W
         gen.H = TARGET_H
 
+        # Generate impressions without saving debug masks
         impressions = gen.generate_impressions(
             master_img=master_small, 
-            out_dir=current_out_dir / 'impressions',
+            out_dir=current_out_dir,
             n_impr=3,
             min_noise_level=0,
             max_noise_level=0,
-            save_debug=True,
+            save_debug=False,
             out_size=None, 
         )
         
-        print(f'Saved {len(impressions)} impressions to: {current_out_dir / "impressions"}')
+        print(f'Saved {len(impressions)} impressions to: {current_out_dir}')
