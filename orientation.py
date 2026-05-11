@@ -304,7 +304,7 @@ class OrientationMixin:
         _ref_area = 256 * 360
         _canvas_area = (self.H + self.margin) * (self.W + self.margin)
         _area_scale = _canvas_area / _ref_area
-        n_seeds = int((1200 + math.floor(self.ahaq_rand() * 150)) * (_area_scale*0.5))
+        n_seeds = int((1200 + math.floor(self.ahaq_rand() * 150)) * (_area_scale*0.3))
         for _ in range(n_seeds):
             i_blob = math.floor(5 + self.ahaq_rand() * (self.H + self.margin - 10))
             j_blob = math.floor(5 + self.ahaq_rand() * (self.W + self.margin - 10))
