@@ -32,31 +32,35 @@ if __name__ == '__main__':
         strict_assets=True,
         filter_zero_point=46,
     )
-    """
-    info = gen.run_until_global_filter_and_save(
-            class_distribution=6,
-            out_dir=str(out_dir / 'pipeline_steps'),
-        )
-    """
-    master = gen.generate_master(class_distribution=6, save_debug=str(out_dir / 'master_debug'), out_size=None)
     
-    master_small = cv2.resize(master, OUT_SIZE, interpolation=cv2.INTER_AREA)
-    cv2.imwrite(str(out_dir / 'master_debug' / 'master_only_256.png'), master_small)
+    for i in range(100):
+        print(f"Generating master {i+1}/100...")
         
-    gen.save_metadata(out_dir / 'master_debug' / 'metadata.txt')
+        # Reset generator dimensions for master generation
+        gen.W = RENDER_W
+        gen.H = RENDER_H
+        
+        current_out_dir = out_dir / f'fingerprint_{i:03d}'
+        
+        master = gen.generate_master(class_distribution=0, save_debug=str(current_out_dir / 'master_debug'), out_size=None)
+        
+        master_small = cv2.resize(master, OUT_SIZE, interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(current_out_dir / 'master_debug' / 'master_only_256.png'), master_small)
+            
+        gen.save_metadata(current_out_dir / 'master_debug' / 'metadata.txt')
 
-    gen.W = TARGET_W
-    gen.H = TARGET_H
+        # Set smaller dimensions for impression distortion
+        gen.W = TARGET_W
+        gen.H = TARGET_H
 
-    impressions = gen.generate_impressions(
-        master_img=master_small, 
-        out_dir=out_dir / 'impressions',
-        n_impr=4,
-        min_noise_level=0,
-        max_noise_level=0,
-        save_debug=True,
-        out_size=None, 
-    )
-    # ----------------------------
-    
-    print(f'Saved {len(impressions)} impressions to: {out_dir / "impressions"}')
+        impressions = gen.generate_impressions(
+            master_img=master_small, 
+            out_dir=current_out_dir / 'impressions',
+            n_impr=3,
+            min_noise_level=0,
+            max_noise_level=0,
+            save_debug=True,
+            out_size=None, 
+        )
+        
+        print(f'Saved {len(impressions)} impressions to: {current_out_dir / "impressions"}')
