@@ -26,9 +26,9 @@ if __name__ == '__main__':
         W=RENDER_W,
         H=RENDER_H,
         generation_seed=42,
-        density_dir=Path('Densitymaps'),
-        filterbank_dir=Path('filterbank_packed.npz'),
-        noise_blob_dir=Path('noise_blob'),
+        density_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/Densitymaps'),
+        filterbank_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/filterbank_packed.npz'),
+        noise_blob_dir=Path('/kaggle/input/datasets/poseidon127/anguli-packed/noise_blob'),
         strict_assets=True,
         filter_zero_point=46,
     )
